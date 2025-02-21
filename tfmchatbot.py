@@ -3,6 +3,7 @@ import pandas as pd
 from google.cloud import storage
 from chatterbot import ChatBot
 from chatterbot.trainers import ListTrainer
+from io import StringIO  
 
 # 📌 Configuración del Cliente de Google Cloud Storage
 BUCKET_NAME = "monitoreo_gcp_bucket"
@@ -24,7 +25,7 @@ def cargar_datos():
         try:
             blob = bucket.blob(archivo)
             contenido = blob.download_as_text()
-            df = pd.read_csv(pd.compat.StringIO(contenido))
+            df = pd.read_csv(StringIO(contenido))  # Usa io.StringIO en lugar de pandas.compat.StringIO
             datos[modelo] = df
         except Exception as e:
             st.error(f"❌ Error al cargar {archivo}: {e}")
