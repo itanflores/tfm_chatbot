@@ -1,5 +1,5 @@
 # =============================================================================
-# Name: streamlit_app_v1.3.py
+# Name: streamlit_app_v1.4.py
 # Description:
 #   Aplicación Streamlit con tres pestañas principales:
 #     1) ChatBot de Soporte TI: Responde preguntas sobre el dataset y el modelo,
@@ -11,10 +11,11 @@
 #          B) Resultados de la Clasificación (dataset ganador, con visualizaciones de
 #             importancia de variables y pronósticos de temperatura).
 #
-#   Se incluye la función 'upload_to_s3' correctamente definida y utilizada, para
-#   evitar el error NameError.
+#   Versión 1.4:
+#     - Guarda temp_original_min y temp_original_max en procesar_datos()
+#     - Realiza inversa del escalado (unscale) en predecir_temperatura_futura()
+#     - Evita KeyError si no se han definido min y max de temperatura.
 #
-# Version: 1.3.0
 # =============================================================================
 
 import streamlit as st
@@ -102,6 +103,7 @@ def procesar_datos(df):
     Realiza el preprocesamiento del dataset:
       - Conversión de 'Fecha' a datetime.
       - Eliminación de duplicados y registros nulos.
+      - Guarda min y max de 'Temperatura (°C)' en st.session_state
       - Codificación ordinal de 'Estado del Sistema'.
       - One-hot encoding para 'Tipo de Servidor'.
       - Normalización de métricas continuas mediante MinMaxScaler.
@@ -110,6 +112,11 @@ def procesar_datos(df):
     df_procesado["Fecha"] = pd.to_datetime(df_procesado["Fecha"], errors="coerce")
     df_procesado.drop_duplicates(inplace=True)
     df_procesado.dropna(inplace=True)
+
+    # Guardar min y max de la temperatura original antes de escalar
+    if "Temperatura (°C)" in df_procesado.columns:
+        st.session_state["temp_original_min"] = df_procesado["Temperatura (°C)"].min()
+        st.session_state["temp_original_max"] = df_procesado["Temperatura (°C)"].max()
 
     if "Estado del Sistema" in df_procesado.columns:
         estado_mapping = {"Inactivo": 0, "Normal": 1, "Advertencia": 2, "Crítico": 3}
@@ -190,30 +197,35 @@ def entrenar_modelos():
                    f"({st.session_state['model_scores'][best_model]:.2%}).")
 
 # -----------------------------------------------------------------------------
-# Función para predecir temperatura futura usando regresión lineal
+# Función para predecir temperatura futura usando regresión lineal (unscale)
 # -----------------------------------------------------------------------------
 def predecir_temperatura_futura(df, horizon=7):
     """
     Utiliza regresión lineal para predecir la temperatura (°C) en el futuro.
-    Se convierte la fecha a ordinal para entrenar el modelo, y luego se aplica
-    la conversión inversa a la escala original de temperatura.
+    Se convierte la fecha a ordinal para entrenar el modelo. Luego,
+    se aplica la inversa del escalado usando temp_original_min y temp_original_max
+    almacenados en st.session_state.
     """
+    # Verificar que existan las claves para reescalar la temperatura
+    if "temp_original_min" not in st.session_state or "temp_original_max" not in st.session_state:
+        st.error("No se han definido los valores mínimos y máximos de temperatura. "
+                 "Asegúrate de haber procesado el dataset antes.")
+        return pd.DataFrame()
+
     df_forecast = df.copy().sort_values("Fecha")
     df_forecast["Fecha_ordinal"] = df_forecast["Fecha"].map(lambda x: x.toordinal())
 
     X = df_forecast["Fecha_ordinal"].values.reshape(-1, 1)
-    y = df_forecast["Temperatura (°C)"].values  # y está en rango [0, 1] tras el escalado
+    y_scaled = df_forecast["Temperatura (°C)"].values  # y está en [0,1] tras el escalado
 
-    # Entrenar un modelo de regresión (p.ej. LinearRegression)
     lr = LinearRegression()
-    lr.fit(X, y)
+    lr.fit(X, y_scaled)
 
-    # Generar fechas futuras
     last_date = df_forecast["Fecha"].max()
     future_dates = [last_date + pd.Timedelta(days=i) for i in range(1, horizon+1)]
     future_ordinals = np.array([d.toordinal() for d in future_dates]).reshape(-1, 1)
 
-    # Predecir valores escalados
+    # Predicciones en la escala [0,1]
     y_pred_scaled = lr.predict(future_ordinals)
 
     # ---- PASO CLAVE: Convertir de [0,1] a la escala real ----
@@ -221,14 +233,11 @@ def predecir_temperatura_futura(df, horizon=7):
     temp_max = st.session_state["temp_original_max"]
     y_pred_real = y_pred_scaled * (temp_max - temp_min) + temp_min
 
-    # Crear un DataFrame con los resultados
     forecast_df = pd.DataFrame({
         "Fecha": future_dates,
-        "Temperatura Predicha (°C)": y_pred_real  # usar valores reales
+        "Temperatura Predicha (°C)": y_pred_real  # valores reales
     })
-
     return forecast_df
-
 
 # -----------------------------------------------------------------------------
 # Función extendida para responder preguntas del ChatBot
@@ -261,8 +270,15 @@ def responder_pregunta(pregunta: str) -> str:
         return base_message + f"el dataset tiene {num_registros} registros."
     elif "temperatura" in pregunta_lower and "promedio" in pregunta_lower:
         if "Temperatura (°C)" in df_ref.columns:
-            temp_promedio = df_ref["Temperatura (°C)"].mean()
-            return base_message + f"la temperatura promedio es {temp_promedio:.2f} °C."
+            # Convertir la temperatura promedio escalada a la escala real
+            # si deseas ver la "Temperatura (°C)" en su versión unscaled, 
+            # haz un approach similar, pero en general ya la normalización
+            # se usó para el entrenamiento.
+            temp_promedio_scaled = df_ref["Temperatura (°C)"].mean()
+            temp_min = st.session_state.get("temp_original_min", 0)
+            temp_max = st.session_state.get("temp_original_max", 100)
+            temp_promedio_real = temp_promedio_scaled * (temp_max - temp_min) + temp_min
+            return base_message + f"la temperatura promedio es {temp_promedio_real:.2f} °C."
         else:
             return base_message + "no se encontró la columna 'Temperatura (°C)'."
     # Nueva funcionalidad: Importancia de Variables
@@ -288,8 +304,11 @@ def responder_pregunta(pregunta: str) -> str:
     elif "proyección" in pregunta_lower or "futuro" in pregunta_lower or "pronóstico" in pregunta_lower:
         if "Temperatura (°C)" in df_ref.columns and "Fecha" in df_ref.columns:
             forecast_df = predecir_temperatura_futura(df_ref, horizon=7)
-            avg_forecast = forecast_df["Temperatura Predicha (°C)"].mean()
-            return base_message + f"se proyecta que la temperatura promedio en los próximos 7 días será de aproximadamente {avg_forecast:.2f} °C."
+            if not forecast_df.empty:
+                avg_forecast = forecast_df["Temperatura Predicha (°C)"].mean()
+                return base_message + f"se proyecta que la temperatura promedio en los próximos 7 días será de aproximadamente {avg_forecast:.2f} °C."
+            else:
+                return "No se pudo generar el pronóstico por falta de datos."
         else:
             return base_message + "No se dispone de las columnas necesarias para la proyección."
     else:
@@ -305,7 +324,7 @@ def responder_pregunta(pregunta: str) -> str:
 # -----------------------------------------------------------------------------
 # Interfaz Streamlit: Definición de pestañas principales y subpestañas
 # -----------------------------------------------------------------------------
-st.title("Aplicación Integrada: ChatBot, Datasets y Tablero Interactivo")
+st.title("Aplicación Integrada: ChatBot, Datasets y Tablero Interactivo (v1.4)")
 
 tab_chatbot, tab_datasets, tab_dashboard = st.tabs([
     "🤖 ChatBot de Soporte",
@@ -481,12 +500,15 @@ with tab_dashboard:
             else:
                 st.info("No se ha almacenado el modelo ganador.")
 
-            # Pronóstico de Temperatura Futura
+            # Pronóstico de Temperatura Futura (escala real)
             st.markdown("#### Pronóstico de Temperatura Futura")
             if "Temperatura (°C)" in df_ganador.columns and "Fecha" in df_ganador.columns:
                 forecast_df = predecir_temperatura_futura(df_ganador, horizon=7)
-                fig_forecast = px.line(forecast_df, x="Fecha", y="Temperatura Predicha (°C)",
-                                       title="Pronóstico de Temperatura Futura (Próximos 7 días)")
-                st.plotly_chart(fig_forecast, use_container_width=True)
+                if not forecast_df.empty:
+                    fig_forecast = px.line(forecast_df, x="Fecha", y="Temperatura Predicha (°C)",
+                                           title="Pronóstico de Temperatura Futura (Próximos 7 días)")
+                    st.plotly_chart(fig_forecast, use_container_width=True)
+                else:
+                    st.info("No se pudo generar el pronóstico por falta de datos o columnas.")
             else:
                 st.info("No se dispone de las columnas necesarias para el pronóstico.")
