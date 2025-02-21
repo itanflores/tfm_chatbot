@@ -35,7 +35,7 @@ bucket_gcp = storage_client.bucket(BUCKET_GCP)
 s3_client = boto3.client("s3")
 
 # -----------------------------------------------------------------------------
-#                       FUNCIONES DE PROCESAMIENTO Y MODELOS
+#                  FUNCIONES PARA CARGAR Y PROCESAR LOS DATOS
 # -----------------------------------------------------------------------------
 
 @st.cache_data
@@ -50,7 +50,6 @@ def cargar_datos():
     except Exception as e:
         st.error(f"❌ Error al descargar el archivo desde GCP: {e}")
         return None
-
 
 def procesar_datos(df, modelo):
     """Realiza limpieza, codificación y normalización de datos."""
@@ -81,6 +80,9 @@ def procesar_datos(df, modelo):
 
     return df_procesado
 
+# -----------------------------------------------------------------------------
+#                     FUNCIONES DE ENTRENAMIENTO DE MODELOS
+# -----------------------------------------------------------------------------
 
 def entrenar_modelos():
     """Carga datos, entrena cada modelo y guarda los DataFrames procesados."""
@@ -130,9 +132,8 @@ def entrenar_modelos():
             st.success(f"✅ {modelo} entrenado con precisión: {precision:.2%}")
             st.success(f"📤 Datos exportados a GCP: {BUCKET_GCP}/{archivo_salida}")
 
-
 # -----------------------------------------------------------------------------
-#                      FUNCIONES ADICIONALES PARA DESCARGA
+#                 FUNCIÓN PARA SUBIR ARCHIVOS A S3 (DESCARGA/ENVÍO)
 # -----------------------------------------------------------------------------
 
 def upload_to_s3(file_content, file_name):
@@ -144,6 +145,61 @@ def upload_to_s3(file_content, file_name):
     )
     st.success(f"Archivo '{file_name}' enviado a S3 correctamente.")
 
+# -----------------------------------------------------------------------------
+#               LÓGICA DEL CHATBOT PARA RESPUESTAS BÁSICAS
+# -----------------------------------------------------------------------------
+
+# Corpus básico (descripciones de lo que podemos responder)
+default_corpus = {
+    "estado_critico": "Número de servidores con 'Estado del Sistema Codificado' = 3",
+    "registros": "Número total de filas (registros) en el dataset procesado",
+    "temperatura_promedio": "Valor medio de la columna 'Temperatura (°C)'"
+}
+
+def responder_pregunta(pregunta: str) -> str:
+    """
+    Intenta interpretar la pregunta y devuelve una respuesta basada en
+    los DataFrames procesados disponibles en session_state.
+    """
+    pregunta_lower = pregunta.lower()
+
+    # Verificamos si hay DataFrames procesados
+    if "processed_dfs" not in st.session_state or not st.session_state["processed_dfs"]:
+        return "Aún no hay datos procesados. Por favor, procesa los modelos primero."
+
+    # Tomamos como referencia el último DF procesado (o uno específico)
+    # Si deseas uno en particular, puedes usar st.session_state["processed_dfs"]["Random Forest"], etc.
+    ultimo_modelo = list(st.session_state["processed_dfs"].keys())[-1]
+    df_ref = st.session_state["processed_dfs"][ultimo_modelo]
+
+    # 1. ¿Cuántos servidores están en estado crítico?
+    if "crítico" in pregunta_lower or "critico" in pregunta_lower:
+        # Contamos filas con Estado del Sistema Codificado = 3
+        if "Estado del Sistema Codificado" in df_ref.columns:
+            num_criticos = (df_ref["Estado del Sistema Codificado"] == 3).sum()
+            return f"Hay {num_criticos} servidores en estado crítico."
+        else:
+            return "No se encontró la columna 'Estado del Sistema Codificado' en los datos."
+
+    # 2. ¿Cuántos registros tiene el dataset?
+    elif "registros" in pregunta_lower or "filas" in pregunta_lower or "dataset" in pregunta_lower:
+        num_registros = df_ref.shape[0]
+        return f"El dataset tiene {num_registros} registros."
+
+    # 3. ¿Cuál es la temperatura promedio de los servidores?
+    elif "temperatura" in pregunta_lower and "promedio" in pregunta_lower:
+        if "Temperatura (°C)" in df_ref.columns:
+            temp_promedio = df_ref["Temperatura (°C)"].mean()
+            return f"La temperatura promedio de los servidores es {temp_promedio:.2f} °C."
+        else:
+            return "No se encontró la columna 'Temperatura (°C)' en los datos."
+
+    # Si la pregunta no coincide con nada conocido
+    else:
+        return "Lo siento, no reconozco esa pregunta. Prueba con:\n" \
+               "1) ¿Cuántos servidores están en estado crítico?\n" \
+               "2) ¿Cuántos registros tiene el dataset?\n" \
+               "3) ¿Cuál es la temperatura promedio de los servidores?"
 
 # -----------------------------------------------------------------------------
 #                           INTERFAZ STREAMLIT
@@ -160,15 +216,24 @@ tab_chatbot, tab_datasets = st.tabs([
 # ===================== PESTAÑA: ChatBot de Soporte ============================
 with tab_chatbot:
     st.subheader("🤖 ChatBot de Soporte TI")
-    st.write("Puedes hacer preguntas sobre los modelos y datos.")
+    st.write("Puedes hacer preguntas sobre el estado de los servidores y los datos procesados.")
+
+    # Instrucciones de uso
+    st.markdown(
+        """
+        **Ejemplos de preguntas:**
+        - ¿Cuántos servidores están en estado crítico?
+        - ¿Cuántos registros tiene el dataset?
+        - ¿Cuál es la temperatura promedio de los servidores?
+        """
+    )
 
     if "chat_history" not in st.session_state:
         st.session_state["chat_history"] = []
 
     pregunta = st.text_input("Escribe tu pregunta:")
     if st.button("Enviar"):
-        # Respuesta de ejemplo (puede sustituirse por lógica más compleja)
-        respuesta = "Todavía no tengo respuesta para esto. 🚀"
+        respuesta = responder_pregunta(pregunta)
         st.session_state["chat_history"].append(f"👤 {pregunta}")
         st.session_state["chat_history"].append(f"🤖 {respuesta}")
 
