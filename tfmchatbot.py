@@ -48,24 +48,33 @@ def cargar_datos():
 # 📌 Función para procesar los datos
 def procesar_datos(df, modelo):
     df_procesado = df.copy()
+
+    # Convertir fecha y limpiar datos
     df_procesado["Fecha"] = pd.to_datetime(df_procesado["Fecha"], errors="coerce")
     df_procesado.drop_duplicates(inplace=True)
     df_procesado.dropna(inplace=True)
-    
-    estado_mapping = {"Inactivo": 0, "Normal": 1, "Advertencia": 2, "Crítico": 3}
-    df_procesado["Estado del Sistema Codificado"] = df_procesado["Estado del Sistema"].map(estado_mapping)
-    
+
+    # Verificar si 'Estado del Sistema' está en el dataset
+    if "Estado del Sistema" in df_procesado.columns:
+        estado_mapping = {"Inactivo": 0, "Normal": 1, "Advertencia": 2, "Crítico": 3}
+        df_procesado["Estado del Sistema Codificado"] = df_procesado["Estado del Sistema"].map(estado_mapping)
+        
+        # Si hay valores no mapeados, llenar con -1
+        df_procesado["Estado del Sistema Codificado"].fillna(-1, inplace=True)
+    else:
+        st.error("⚠️ La columna 'Estado del Sistema' no está en el dataset.")
+        return None  # Detener el procesamiento si la columna no existe
+
+    # Aplicar One-Hot Encoding a 'Tipo de Servidor'
     df_procesado = pd.get_dummies(df_procesado, columns=["Tipo de Servidor"], prefix="Servidor", drop_first=True)
-    
+
+    # Normalizar métricas
     scaler = MinMaxScaler()
     metricas_continuas = ["Uso CPU (%)", "Temperatura (°C)", "Carga de Red (MB/s)", "Latencia Red (ms)"]
-
-    if modelo == "Regresión Logística":
-        df_procesado[metricas_continuas] = (df_procesado[metricas_continuas] - df_procesado[metricas_continuas].mean()) / df_procesado[metricas_continuas].std()
-    else:
-        df_procesado[metricas_continuas] = scaler.fit_transform(df_procesado[metricas_continuas])
+    df_procesado[metricas_continuas] = scaler.fit_transform(df_procesado[metricas_continuas])
 
     return df_procesado
+
 
 # 📌 Procesamiento de modelos
 def entrenar_modelos():
