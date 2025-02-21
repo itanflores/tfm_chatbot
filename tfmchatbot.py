@@ -195,20 +195,40 @@ def entrenar_modelos():
 def predecir_temperatura_futura(df, horizon=7):
     """
     Utiliza regresión lineal para predecir la temperatura (°C) en el futuro.
-    Se convierte la fecha a ordinal para entrenar el modelo.
+    Se convierte la fecha a ordinal para entrenar el modelo, y luego se aplica
+    la conversión inversa a la escala original de temperatura.
     """
     df_forecast = df.copy().sort_values("Fecha")
     df_forecast["Fecha_ordinal"] = df_forecast["Fecha"].map(lambda x: x.toordinal())
+
     X = df_forecast["Fecha_ordinal"].values.reshape(-1, 1)
-    y = df_forecast["Temperatura (°C)"].values
+    y = df_forecast["Temperatura (°C)"].values  # y está en rango [0, 1] tras el escalado
+
+    # Entrenar un modelo de regresión (p.ej. LinearRegression)
     lr = LinearRegression()
     lr.fit(X, y)
+
+    # Generar fechas futuras
     last_date = df_forecast["Fecha"].max()
     future_dates = [last_date + pd.Timedelta(days=i) for i in range(1, horizon+1)]
     future_ordinals = np.array([d.toordinal() for d in future_dates]).reshape(-1, 1)
-    y_pred = lr.predict(future_ordinals)
-    forecast_df = pd.DataFrame({"Fecha": future_dates, "Temperatura Predicha (°C)": y_pred})
+
+    # Predecir valores escalados
+    y_pred_scaled = lr.predict(future_ordinals)
+
+    # ---- PASO CLAVE: Convertir de [0,1] a la escala real ----
+    temp_min = st.session_state["temp_original_min"]
+    temp_max = st.session_state["temp_original_max"]
+    y_pred_real = y_pred_scaled * (temp_max - temp_min) + temp_min
+
+    # Crear un DataFrame con los resultados
+    forecast_df = pd.DataFrame({
+        "Fecha": future_dates,
+        "Temperatura Predicha (°C)": y_pred_real  # usar valores reales
+    })
+
     return forecast_df
+
 
 # -----------------------------------------------------------------------------
 # Función extendida para responder preguntas del ChatBot
