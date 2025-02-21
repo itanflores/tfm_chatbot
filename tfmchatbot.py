@@ -54,13 +54,11 @@ def procesar_datos(df, modelo):
     df_procesado.drop_duplicates(inplace=True)
     df_procesado.dropna(inplace=True)
 
-    # ✅ Verificar y convertir 'Estado del Sistema' a valores numéricos
+    # Verificar existencia de 'Estado del Sistema'
     if "Estado del Sistema" in df_procesado.columns:
         estado_mapping = {"Inactivo": 0, "Normal": 1, "Advertencia": 2, "Crítico": 3}
         df_procesado["Estado del Sistema Codificado"] = df_procesado["Estado del Sistema"].map(estado_mapping)
-
-        # Manejo de valores desconocidos
-        df_procesado["Estado del Sistema Codificado"].fillna(-1, inplace=True)
+        df_procesado["Estado del Sistema Codificado"] = df_procesado["Estado del Sistema Codificado"].fillna(-1)
     else:
         st.error("⚠️ La columna 'Estado del Sistema' no está en el dataset.")
         return None  # Detener si falta esta columna
@@ -85,18 +83,9 @@ def entrenar_modelos():
     for modelo in ARCHIVOS_PROCESADOS.keys():
         df_procesado = procesar_datos(df, modelo)
         if df_procesado is not None:
-            # ✅ Verificar si la columna 'Estado del Sistema Codificado' existe
-            if "Estado del Sistema Codificado" not in df_procesado.columns:
-                st.error(f"⚠️ El dataset procesado para {modelo} no tiene la columna 'Estado del Sistema Codificado'.")
-                continue
-
-            X = df_procesado.drop(["Estado del Sistema Codificado", "Fecha", "Hostname"], axis=1, errors="ignore")
+            # Excluir la columna original 'Estado del Sistema' que contiene texto
+            X = df_procesado.drop(["Estado del Sistema", "Estado del Sistema Codificado", "Fecha", "Hostname"], axis=1, errors="ignore")
             y = df_procesado["Estado del Sistema Codificado"]
-
-            # ✅ Asegurar que y solo contiene valores numéricos
-            if not np.issubdtype(y.dtype, np.number):
-                st.error(f"❌ La columna 'Estado del Sistema Codificado' contiene valores no numéricos en {modelo}.")
-                continue
 
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
 
@@ -143,7 +132,7 @@ with tab4:
 
     pregunta = st.text_input("Escribe tu pregunta:")
     if st.button("Enviar"):
-        respuesta = "Todavía no tengo respuesta para esto. 🚀"
+        respuesta = "Todavía no tengo respuesta para esto. 🚀"  # Aquí se puede mejorar la IA
         st.session_state["chat_history"].append(f"👤 {pregunta}")
         st.session_state["chat_history"].append(f"🤖 {respuesta}")
 
@@ -153,6 +142,21 @@ with tab4:
 # 📌 Sección de Carga y Envío de Datasets
 with tab5:
     st.subheader("📂 Cargar y Enviar Datasets")
+
+    # Subida a GCP
+    st.markdown("### 🌍 Subir un archivo CSV a GCP")
+    archivo_gcp = st.file_uploader("Selecciona un archivo CSV para GCP", type=["csv"])
+    if archivo_gcp and st.button("📤 Enviar a GCP"):
+        blob = bucket_gcp.blob(archivo_gcp.name)
+        blob.upload_from_file(archivo_gcp)
+        st.success(f"✅ Archivo '{archivo_gcp.name}' subido a GCP ({BUCKET_GCP}) correctamente.")
+
+    # Subida a S3
+    st.markdown("### ☁️ Subir un archivo CSV a Amazon S3")
+    archivo_s3 = st.file_uploader("Selecciona un archivo CSV para S3", type=["csv"])
+    if archivo_s3 and st.button("📤 Enviar a S3"):
+        s3_client.upload_fileobj(archivo_s3, BUCKET_S3, archivo_s3.name)
+        st.success(f"✅ Archivo '{archivo_s3.name}' subido a S3 ({BUCKET_S3}) correctamente.")
 
     # Botón para procesar modelos
     if st.button("⚙️ Procesar Modelos"):
