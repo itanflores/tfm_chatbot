@@ -30,7 +30,7 @@ import boto3
 # -----------------------------------------------------------------------------
 BUCKET_GCP = "monitoreo_gcp_bucket"
 BUCKET_S3 = "tfm-monitoring-data"
-ARCHIVO_DATOS = "dataset_monitoreo_servers_EJEMPLO.csv"
+ARCHIVO_DATOS = "dataset_monitoreo_servers.csv"
 
 # Se definen los nombres de archivo de salida para cada modelo.
 ARCHIVOS_PROCESADOS = {
