@@ -14,7 +14,7 @@ import boto3
 # 📌 Configuración de los Buckets
 BUCKET_GCP = "monitoreo_gcp_bucket"
 BUCKET_S3 = "tfm-monitoring-data"
-ARCHIVO_DATOS = "dataset_monitoreo_servers.csv"
+ARCHIVO_DATOS = "dataset_monitoreo_servers_EJEMPLO.csv"
 
 # Diccionario con los nombres de los datasets procesados para cada modelo
 ARCHIVOS_PROCESADOS = {
@@ -58,6 +58,7 @@ def procesar_datos(df, modelo):
     if "Estado del Sistema" in df_procesado.columns:
         estado_mapping = {"Inactivo": 0, "Normal": 1, "Advertencia": 2, "Crítico": 3}
         df_procesado["Estado del Sistema Codificado"] = df_procesado["Estado del Sistema"].map(estado_mapping)
+        # Evitar FutureWarning usando asignación en lugar de inplace=True
         df_procesado["Estado del Sistema Codificado"] = df_procesado["Estado del Sistema Codificado"].fillna(-1)
     else:
         st.error("⚠️ La columna 'Estado del Sistema' no está en el dataset.")
@@ -84,10 +85,13 @@ def entrenar_modelos():
         df_procesado = procesar_datos(df, modelo)
         if df_procesado is not None:
             # Excluir la columna original 'Estado del Sistema' que contiene texto
-            X = df_procesado.drop(["Estado del Sistema", "Estado del Sistema Codificado", "Fecha", "Hostname"], axis=1, errors="ignore")
+            X = df_procesado.drop(["Estado del Sistema", "Estado del Sistema Codificado", 
+                                   "Fecha", "Hostname"], axis=1, errors="ignore")
             y = df_procesado["Estado del Sistema Codificado"]
 
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.3, random_state=42, stratify=y
+            )
 
             # Seleccionar modelo
             if modelo == "Árbol de Decisión":
@@ -109,21 +113,21 @@ def entrenar_modelos():
             st.success(f"✅ {modelo} entrenado con precisión: {precision:.2%}")
             st.success(f"📤 Datos exportados a GCP: {BUCKET_GCP}/{archivo_salida}")
 
-# 📌 Streamlit UI
-st.title("📊 Comparación de Modelos de Clasificación")
+# -----------------------------------------------------------------------------
+#                           STREAMLIT UI
+# -----------------------------------------------------------------------------
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🌳 Árbol de Decisión", "📈 Regresión Logística", "🌲 Random Forest", "🤖 ChatBot de Soporte", "📂 Cargar y Enviar Datasets"
+# Título principal de la app
+st.title("Aplicación: ChatBot y Cargar/Enviar Datasets")
+
+# Crea solo dos pestañas
+tab_chatbot, tab_datasets = st.tabs([
+    "🤖 ChatBot de Soporte", 
+    "📂 Cargar y Enviar Datasets"
 ])
 
-# 📌 Sección de modelos
-for tab, modelo in zip([tab1, tab2, tab3], ARCHIVOS_PROCESADOS.keys()):
-    with tab:
-        st.subheader(modelo)
-        st.write(f"Aquí se mostrarán los resultados del modelo de {modelo}.")
-
-# 📌 Sección de Chatbot
-with tab4:
+# ===================== PESTAÑA: ChatBot de Soporte ============================
+with tab_chatbot:
     st.subheader("🤖 ChatBot de Soporte TI")
     st.write("Puedes hacer preguntas sobre los modelos y datos.")
 
@@ -132,15 +136,16 @@ with tab4:
 
     pregunta = st.text_input("Escribe tu pregunta:")
     if st.button("Enviar"):
-        respuesta = "Todavía no tengo respuesta para esto. 🚀"  # Aquí se puede mejorar la IA
+        # Respuesta de ejemplo (puede sustituirse por lógica más compleja)
+        respuesta = "Todavía no tengo respuesta para esto. 🚀"
         st.session_state["chat_history"].append(f"👤 {pregunta}")
         st.session_state["chat_history"].append(f"🤖 {respuesta}")
 
     for msg in st.session_state["chat_history"]:
         st.write(msg)
 
-# 📌 Sección de Carga y Envío de Datasets
-with tab5:
+# ===================== PESTAÑA: Cargar y Enviar Datasets ======================
+with tab_datasets:
     st.subheader("📂 Cargar y Enviar Datasets")
 
     # Subida a GCP
@@ -158,6 +163,6 @@ with tab5:
         s3_client.upload_fileobj(archivo_s3, BUCKET_S3, archivo_s3.name)
         st.success(f"✅ Archivo '{archivo_s3.name}' subido a S3 ({BUCKET_S3}) correctamente.")
 
-    # Botón para procesar modelos
+    # Botón para procesar modelos (opcional)
     if st.button("⚙️ Procesar Modelos"):
         entrenar_modelos()
