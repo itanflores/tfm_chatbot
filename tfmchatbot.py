@@ -17,7 +17,7 @@ import boto3
 
 BUCKET_GCP = "monitoreo_gcp_bucket"
 BUCKET_S3 = "tfm-monitoring-data"
-ARCHIVO_DATOS = "dataset_monitoreo_servers.csv"
+ARCHIVO_DATOS = "dataset_monitoreo_servers_EJEMPLO.csv"
 
 ARCHIVOS_PROCESADOS = {
     "Árbol de Decisión": "dataset_procesado_arbol_decision.csv",
@@ -85,14 +85,20 @@ def procesar_datos(df, modelo):
 # -----------------------------------------------------------------------------
 
 def entrenar_modelos():
-    """Carga datos, entrena cada modelo y guarda los DataFrames procesados."""
+    """
+    Carga datos, entrena cada modelo y:
+    - Guarda los DataFrames procesados en st.session_state["processed_dfs"]
+    - Guarda las precisiones en st.session_state["model_scores"]
+    - Determina el modelo con mejor precisión y lo guarda en st.session_state["best_model"]
+    """
     df = cargar_datos()
     if df is None:
         st.error("❌ No se pudo cargar el dataset.")
         return
 
-    # Preparar un contenedor en session_state para guardar los DF procesados
+    # Preparar contenedores en session_state
     st.session_state["processed_dfs"] = {}
+    st.session_state["model_scores"] = {}
 
     for modelo in ARCHIVOS_PROCESADOS.keys():
         df_procesado = procesar_datos(df, modelo)
@@ -126,11 +132,19 @@ def entrenar_modelos():
             blob_procesado = bucket_gcp.blob(archivo_salida)
             blob_procesado.upload_from_string(df_procesado.to_csv(index=False), content_type="text/csv")
 
-            # Guardar el DataFrame procesado en session_state
+            # Guardar el DataFrame y la precisión
             st.session_state["processed_dfs"][modelo] = df_procesado
+            st.session_state["model_scores"][modelo] = precision
 
             st.success(f"✅ {modelo} entrenado con precisión: {precision:.2%}")
             st.success(f"📤 Datos exportados a GCP: {BUCKET_GCP}/{archivo_salida}")
+
+    # Determinar el modelo con mejor precisión
+    if st.session_state["model_scores"]:
+        best_model = max(st.session_state["model_scores"], key=st.session_state["model_scores"].get)
+        st.session_state["best_model"] = best_model
+        st.success(f"El modelo con mejor precisión es: {best_model} "
+                   f"({st.session_state['model_scores'][best_model]:.2%}).")
 
 # -----------------------------------------------------------------------------
 #                 FUNCIÓN PARA SUBIR ARCHIVOS A S3 (DESCARGA/ENVÍO)
@@ -146,66 +160,63 @@ def upload_to_s3(file_content, file_name):
     st.success(f"Archivo '{file_name}' enviado a S3 correctamente.")
 
 # -----------------------------------------------------------------------------
-#               LÓGICA DEL CHATBOT PARA RESPUESTAS MÚLTIPLES
+#               LÓGICA DEL CHATBOT PARA RESPUESTAS BASADAS EN EL MEJOR MODELO
 # -----------------------------------------------------------------------------
 
 def responder_pregunta(pregunta: str) -> str:
     """
-    Interpreta la pregunta y devuelve una respuesta para cada DataFrame
-    en st.session_state["processed_dfs"] (uno por modelo).
+    Responde usando únicamente el modelo de mayor precisión.
+    - st.session_state["best_model"] indica el nombre del mejor modelo.
+    - st.session_state["processed_dfs"][best_model] es el DataFrame correspondiente.
     """
     pregunta_lower = pregunta.lower()
 
-    # Verificamos si hay DataFrames procesados
-    if "processed_dfs" not in st.session_state or not st.session_state["processed_dfs"]:
-        return "Aún no hay datos procesados. Por favor, procesa los modelos primero."
+    # Verificamos si hay un "mejor modelo" identificado
+    if "best_model" not in st.session_state:
+        return "Aún no se ha identificado un modelo con mejor precisión. Procesa los modelos primero."
 
-    # Respuestas para cada modelo
-    respuestas = []
+    # Obtenemos el nombre del mejor modelo y su DataFrame
+    best_model = st.session_state["best_model"]
+    df_ref = st.session_state["processed_dfs"].get(best_model)
 
-    # Iteramos por cada modelo y su respectivo DF
-    for modelo, df_ref in st.session_state["processed_dfs"].items():
+    if df_ref is None:
+        return "No se encontraron datos para el mejor modelo. Por favor, procesa los modelos primero."
 
-        # Validaciones para asegurar que las columnas existan
-        tiene_estado = "Estado del Sistema Codificado" in df_ref.columns
-        tiene_temp = "Temperatura (°C)" in df_ref.columns
+    # Mensaje base indicando de qué modelo proviene la respuesta
+    base_message = f"De acuerdo al modelo **{best_model}**, "
 
-        # Pregunta 1: ¿Cuántos servidores están en estado crítico?
-        if ("crítico" in pregunta_lower or "critico" in pregunta_lower):
-            if tiene_estado:
-                num_criticos = (df_ref["Estado del Sistema Codificado"] == 3).sum()
-                respuestas.append(f"**{modelo}**: {num_criticos} servidores en estado crítico.")
-            else:
-                respuestas.append(f"**{modelo}**: No se encontró la columna 'Estado del Sistema Codificado'.")
+    # Validaciones para asegurar que las columnas existan
+    tiene_estado = "Estado del Sistema Codificado" in df_ref.columns
+    tiene_temp = "Temperatura (°C)" in df_ref.columns
 
-        # Pregunta 2: ¿Cuántos registros tiene el dataset?
-        elif ("registros" in pregunta_lower or "filas" in pregunta_lower or "dataset" in pregunta_lower):
-            num_registros = df_ref.shape[0]
-            respuestas.append(f"**{modelo}**: El dataset tiene {num_registros} registros.")
-
-        # Pregunta 3: ¿Cuál es la temperatura promedio de los servidores?
-        elif ("temperatura" in pregunta_lower and "promedio" in pregunta_lower):
-            if tiene_temp:
-                temp_promedio = df_ref["Temperatura (°C)"].mean()
-                respuestas.append(f"**{modelo}**: La temperatura promedio es {temp_promedio:.2f} °C.")
-            else:
-                respuestas.append(f"**{modelo}**: No se encontró la columna 'Temperatura (°C)'.")
+    # Pregunta 1: ¿Cuántos servidores están en estado crítico?
+    if ("crítico" in pregunta_lower or "critico" in pregunta_lower):
+        if tiene_estado:
+            num_criticos = (df_ref["Estado del Sistema Codificado"] == 3).sum()
+            return base_message + f"hay {num_criticos} servidores en estado crítico."
         else:
-            # Si la pregunta no coincide con nada de lo anterior,
-            # se puede retornar un mensaje genérico o seguir iterando
-            pass
+            return base_message + "no se encontró la columna 'Estado del Sistema Codificado'."
 
-    # Si al final no hay respuestas generadas, significa que no hubo match
-    if not respuestas:
-        return (
-            "Lo siento, no reconozco esa pregunta. Prueba con:\n"
-            "- ¿Cuántos servidores están en estado crítico?\n"
-            "- ¿Cuántos registros tiene el dataset?\n"
-            "- ¿Cuál es la temperatura promedio de los servidores?"
-        )
+    # Pregunta 2: ¿Cuántos registros tiene el dataset?
+    elif ("registros" in pregunta_lower or "filas" in pregunta_lower or "dataset" in pregunta_lower):
+        num_registros = df_ref.shape[0]
+        return base_message + f"el dataset tiene {num_registros} registros."
 
-    # Unir todas las respuestas en un solo bloque
-    return "\n".join(respuestas)
+    # Pregunta 3: ¿Cuál es la temperatura promedio de los servidores?
+    elif ("temperatura" in pregunta_lower and "promedio" in pregunta_lower):
+        if tiene_temp:
+            temp_promedio = df_ref["Temperatura (°C)"].mean()
+            return base_message + f"la temperatura promedio es {temp_promedio:.2f} °C."
+        else:
+            return base_message + "no se encontró la columna 'Temperatura (°C)'."
+
+    # Si la pregunta no coincide con nada de lo anterior
+    return (
+        "Lo siento, no reconozco esa pregunta. Prueba con:\n"
+        "- ¿Cuántos servidores están en estado crítico?\n"
+        "- ¿Cuántos registros tiene el dataset?\n"
+        "- ¿Cuál es la temperatura promedio de los servidores?"
+    )
 
 # -----------------------------------------------------------------------------
 #                           INTERFAZ STREAMLIT
@@ -222,7 +233,7 @@ tab_chatbot, tab_datasets = st.tabs([
 # ===================== PESTAÑA: ChatBot de Soporte ============================
 with tab_chatbot:
     st.subheader("🤖 ChatBot de Soporte TI")
-    st.write("Puedes hacer preguntas sobre el estado de los servidores y los datos procesados.")
+    st.write("Este ChatBot responderá con base en el **modelo que obtuvo la mejor precisión**.")
 
     # Instrucciones de uso
     st.markdown(
