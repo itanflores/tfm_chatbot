@@ -2,24 +2,16 @@
 # Name: streamlit_app_v1.3.py
 # Description:
 #   Aplicación Streamlit con tres pestañas principales:
-#     1) ChatBot de Soporte TI
-#     2) Cargar y Enviar Datasets
-#     3) Tablero Interactivo
+#     1) ChatBot de Soporte TI: Responde preguntas sobre el dataset y el modelo,
+#        incluyendo la importancia de variables y proyecciones futuras.
+#     2) Cargar y Enviar Datasets: Permite subir archivos CSV a GCP y S3, entrenar
+#        los modelos y descargar los resultados procesados.
+#     3) Tablero Interactivo: Contiene dos subpestañas:
+#          A) Monitoreo del Estado Real (dataset original)
+#          B) Resultados de la Clasificación (dataset ganador, con visualizaciones de
+#             importancia de variables y pronósticos de temperatura).
 #
-#   En la pestaña "Tablero Interactivo" se han creado DOS subpestañas:
-#     A) Monitoreo del Estado Real (usa dataset original)
-#     B) Resultados de la Clasificación (usa dataset ganador)
-#
-#   Este código integra las visualizaciones recomendadas, tales como:
-#   - KPIs
-#   - Gráfico circular de distribución de estados
-#   - Evolución de estados en el tiempo
-#   - Gráficos de dispersión
-#   - Boxplots
-#   - Matriz de correlación
-#   - Métricas y gráficas basadas en el modelo ganador
-#
-# Version: 1.2.x
+# Version: 1.3.0
 # =============================================================================
 
 import streamlit as st
@@ -34,14 +26,13 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import accuracy_score
 import boto3
-
-# Visualización
 import plotly.express as px
 import seaborn as sns
 import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
 
 # -----------------------------------------------------------------------------
-# Configuración de la página
+# Configuración de la página (única llamada)
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Aplicación Integrada: ChatBot, Datasets y Tablero",
                    page_icon="📊",
@@ -68,9 +59,8 @@ bucket_gcp = storage_client.bucket(BUCKET_GCP)
 s3_client = boto3.client("s3")
 
 # -----------------------------------------------------------------------------
-# Funciones de carga y procesamiento
+# Función para cargar el dataset desde GCP
 # -----------------------------------------------------------------------------
-
 @st.cache_data
 def cargar_datos():
     """
@@ -86,10 +76,17 @@ def cargar_datos():
         st.error(f"❌ Error al descargar el archivo desde GCP: {e}")
         return None
 
+# -----------------------------------------------------------------------------
+# Función para procesar el dataset (unificada para todos los módulos)
+# -----------------------------------------------------------------------------
 def procesar_datos(df):
     """
-    Realiza el preprocesamiento del dataset (normalización, codificación, etc.).
-    Retorna el dataset procesado.
+    Realiza el preprocesamiento del dataset:
+      - Conversión de 'Fecha' a datetime.
+      - Eliminación de duplicados y registros nulos.
+      - Codificación ordinal de 'Estado del Sistema'.
+      - One-hot encoding para 'Tipo de Servidor'.
+      - Normalización de métricas continuas mediante MinMaxScaler.
     """
     df_procesado = df.copy()
     df_procesado["Fecha"] = pd.to_datetime(df_procesado["Fecha"], errors="coerce")
@@ -105,27 +102,34 @@ def procesar_datos(df):
         return None
 
     df_procesado = pd.get_dummies(df_procesado, columns=["Tipo de Servidor"], prefix="Servidor", drop_first=True)
-
     scaler = MinMaxScaler()
     metricas_continuas = ["Uso CPU (%)", "Temperatura (°C)", "Carga de Red (MB/s)", "Latencia Red (ms)"]
     df_procesado[metricas_continuas] = scaler.fit_transform(df_procesado[metricas_continuas])
-
+    
     return df_procesado
 
+# -----------------------------------------------------------------------------
+# Función para entrenar modelos, comparar y definir el dataset ganador
+# -----------------------------------------------------------------------------
 def entrenar_modelos():
     """
-    Entrena tres modelos y define el dataset ganador en st.session_state["best_dataset"].
+    Entrena tres modelos (Árbol de Decisión, Regresión Logística, Random Forest) y:
+      - Guarda los DataFrames procesados en st.session_state["processed_dfs"].
+      - Guarda las precisiones en st.session_state["model_scores"].
+      - Guarda los modelos entrenados en st.session_state["trained_models"].
+      - Determina el modelo con mayor precisión y almacena:
+            st.session_state["best_model"] y st.session_state["best_dataset"].
+      - Almacena los nombres de las variables en st.session_state["feature_names"].
     """
     df = cargar_datos()
     if df is None:
         st.error("❌ No se pudo cargar el dataset original.")
         return
 
-    # Guardar el dataset original en session_state para monitoreo
     st.session_state["original_dataset"] = df
-
     st.session_state["processed_dfs"] = {}
     st.session_state["model_scores"] = {}
+    st.session_state["trained_models"] = {}
 
     for modelo in ARCHIVOS_PROCESADOS.keys():
         df_proc = procesar_datos(df)
@@ -133,6 +137,8 @@ def entrenar_modelos():
             X = df_proc.drop(["Estado del Sistema", "Estado del Sistema Codificado", "Fecha", "Hostname"],
                              axis=1, errors="ignore")
             y = df_proc["Estado del Sistema Codificado"]
+            # Almacenar los nombres de las variables (se asume que son iguales para todos)
+            st.session_state["feature_names"] = list(X.columns)
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
 
             if modelo == "Árbol de Decisión":
@@ -141,17 +147,19 @@ def entrenar_modelos():
                 clf = LogisticRegression(max_iter=3000, random_state=42)
             else:
                 clf = RandomForestClassifier(random_state=42, n_jobs=-1)
-
+            
             clf.fit(X_train, y_train)
             y_pred = clf.predict(X_test)
             precision = accuracy_score(y_test, y_pred)
-
+            
+            # Exportar dataset procesado a GCP
             archivo_salida = ARCHIVOS_PROCESADOS[modelo]
             blob = bucket_gcp.blob(archivo_salida)
             blob.upload_from_string(df_proc.to_csv(index=False), content_type="text/csv")
 
             st.session_state["processed_dfs"][modelo] = df_proc
             st.session_state["model_scores"][modelo] = precision
+            st.session_state["trained_models"][modelo] = clf
 
             st.success(f"✅ {modelo} entrenado con precisión: {precision:.2%}")
             st.success(f"📤 Datos exportados a GCP: {BUCKET_GCP}/{archivo_salida}")
@@ -164,53 +172,100 @@ def entrenar_modelos():
                    f"({st.session_state['model_scores'][best_model]:.2%}).")
 
 # -----------------------------------------------------------------------------
-# Funciones auxiliares
+# Función para predecir temperatura futura usando regresión lineal
 # -----------------------------------------------------------------------------
-
-def upload_to_s3(file_content, file_name):
+def predecir_temperatura_futura(df, horizon=7):
     """
-    Sube el contenido del archivo a S3.
+    Utiliza regresión lineal para predecir la temperatura (°C) en el futuro.
+    Se convierte la fecha a ordinal para entrenar el modelo.
     """
-    s3_client.put_object(Bucket=BUCKET_S3, Key=file_name, Body=file_content)
-    st.success(f"Archivo '{file_name}' enviado a S3 correctamente.")
+    df_forecast = df.copy().sort_values("Fecha")
+    df_forecast["Fecha_ordinal"] = df_forecast["Fecha"].map(lambda x: x.toordinal())
+    X = df_forecast["Fecha_ordinal"].values.reshape(-1, 1)
+    y = df_forecast["Temperatura (°C)"].values
+    lr = LinearRegression()
+    lr.fit(X, y)
+    last_date = df_forecast["Fecha"].max()
+    future_dates = [last_date + pd.Timedelta(days=i) for i in range(1, horizon+1)]
+    future_ordinals = np.array([d.toordinal() for d in future_dates]).reshape(-1, 1)
+    y_pred = lr.predict(future_ordinals)
+    forecast_df = pd.DataFrame({"Fecha": future_dates, "Temperatura Predicha (°C)": y_pred})
+    return forecast_df
 
+# -----------------------------------------------------------------------------
+# Función extendida para responder preguntas del ChatBot
+# -----------------------------------------------------------------------------
 def responder_pregunta(pregunta: str) -> str:
     """
-    Responde la pregunta usando el dataset ganador.
+    Responde preguntas del usuario basándose en el dataset ganador y la información
+    del modelo ganador, incluyendo:
+      - Preguntas sobre el número de servidores, registros y temperatura promedio.
+      - Preguntas sobre la importancia de variables.
+      - Preguntas sobre proyecciones futuras (temperatura).
     """
     pregunta_lower = pregunta.lower()
     if "best_dataset" not in st.session_state:
-        return "Aún no se ha identificado un modelo ganador. Procesa los modelos primero."
-
+        return "Aún no se ha definido un dataset ganador. Procesa los modelos primero."
+    
     df_ref = st.session_state["best_dataset"]
     best_model = st.session_state.get("best_model", "Desconocido")
     base_message = f"De acuerdo al modelo **{best_model}**, "
-
-    if ("crítico" in pregunta_lower or "critico" in pregunta_lower):
+    
+    # Respuesta básica (número de servidores, registros, temperatura promedio)
+    if "crítico" in pregunta_lower or "critico" in pregunta_lower:
         if "Estado del Sistema Codificado" in df_ref.columns:
             num_criticos = (df_ref["Estado del Sistema Codificado"] == 3).sum()
             return base_message + f"hay {num_criticos} servidores en estado crítico."
         else:
             return base_message + "no se encontró la columna 'Estado del Sistema Codificado'."
-    elif ("registros" in pregunta_lower or "filas" in pregunta_lower or "dataset" in pregunta_lower):
+    elif "registros" in pregunta_lower or "filas" in pregunta_lower or "dataset" in pregunta_lower:
         num_registros = df_ref.shape[0]
         return base_message + f"el dataset tiene {num_registros} registros."
-    elif ("temperatura" in pregunta_lower and "promedio" in pregunta_lower):
+    elif "temperatura" in pregunta_lower and "promedio" in pregunta_lower:
         if "Temperatura (°C)" in df_ref.columns:
             temp_promedio = df_ref["Temperatura (°C)"].mean()
             return base_message + f"la temperatura promedio es {temp_promedio:.2f} °C."
         else:
             return base_message + "no se encontró la columna 'Temperatura (°C)'."
+    # Nueva funcionalidad: Importancia de Variables
+    elif "variables" in pregunta_lower and ("explican" in pregunta_lower or "importancia" in pregunta_lower):
+        if "trained_models" in st.session_state and best_model in st.session_state["trained_models"]:
+            model = st.session_state["trained_models"][best_model]
+            if hasattr(model, "feature_importances_"):
+                importances = model.feature_importances_
+                features = st.session_state.get("feature_names", [])
+                if features:
+                    df_imp = pd.DataFrame({"Variable": features, "Importancia": importances})
+                    df_imp = df_imp.sort_values("Importancia", ascending=False)
+                    top_features = df_imp.head(3)
+                    response = "Las variables que más explican el estado son: " + ", ".join(
+                        f"{row['Variable']} ({row['Importancia']*100:.1f}%)" for _, row in top_features.iterrows()
+                    )
+                    return response
+                else:
+                    return base_message + "No se encontraron nombres de variables."
+            else:
+                return base_message + "El modelo ganador no proporciona importancias de variables."
+    # Nueva funcionalidad: Proyección de Temperatura Futura
+    elif "proyección" in pregunta_lower or "futuro" in pregunta_lower or "pronóstico" in pregunta_lower:
+        if "Temperatura (°C)" in df_ref.columns and "Fecha" in df_ref.columns:
+            forecast_df = predecir_temperatura_futura(df_ref, horizon=7)
+            avg_forecast = forecast_df["Temperatura Predicha (°C)"].mean()
+            return base_message + f"se proyecta que la temperatura promedio en los próximos 7 días será de aproximadamente {avg_forecast:.2f} °C."
+        else:
+            return base_message + "No se dispone de las columnas necesarias para la proyección."
     else:
         return (
             "Lo siento, no reconozco esa pregunta. Prueba con:\n"
             "- ¿Cuántos servidores están en estado crítico?\n"
             "- ¿Cuántos registros tiene el dataset?\n"
-            "- ¿Cuál es la temperatura promedio de los servidores?"
+            "- ¿Cuál es la temperatura promedio de los servidores?\n"
+            "- ¿Qué variables explican mejor el estado?\n"
+            "- ¿Qué proyección hay para la temperatura futura?"
         )
 
 # -----------------------------------------------------------------------------
-# Interfaz Streamlit
+# Interfaz Streamlit: Definición de pestañas principales y subpestañas
 # -----------------------------------------------------------------------------
 st.title("Aplicación Integrada: ChatBot, Datasets y Tablero Interactivo")
 
@@ -223,13 +278,15 @@ tab_chatbot, tab_datasets, tab_dashboard = st.tabs([
 # ---------------------- Pestaña: ChatBot de Soporte --------------------------
 with tab_chatbot:
     st.subheader("🤖 ChatBot de Soporte TI")
-    st.write("Este ChatBot responderá basándose en el modelo con mayor precisión.")
+    st.write("Este ChatBot responde en base al modelo con mayor precisión y puede informar sobre la importancia de variables y proyecciones futuras.")
     st.markdown(
         """
         **Ejemplos de preguntas:**
         - ¿Cuántos servidores están en estado crítico?
         - ¿Cuántos registros tiene el dataset?
         - ¿Cuál es la temperatura promedio de los servidores?
+        - ¿Qué variables explican mejor el estado?
+        - ¿Qué proyección hay para la temperatura futura?
         """
     )
     if "chat_history" not in st.session_state:
@@ -275,123 +332,113 @@ with tab_datasets:
 # ------------------- Pestaña: Tablero Interactivo ---------------------------
 with tab_dashboard:
     st.subheader("📊 Tablero Interactivo")
-    # Subpestañas: Monitoreo del Estado Real vs. Resultados de la Clasificación
+    # Se crean dos subpestañas para separar visualizaciones basadas en:
+    # A) el dataset original (Monitoreo del Estado Real) y
+    # B) el dataset ganador (Resultados de la Clasificación)
     sub_tab1, sub_tab2 = st.tabs(["Monitoreo del Estado Real", "Resultados de la Clasificación"])
 
-    # -------- Subpestaña 1: Monitoreo del Estado Real --------
+    # -------- Subpestaña A: Monitoreo del Estado Real --------
     with sub_tab1:
         st.markdown("### Monitoreo del Estado Real")
         if "original_dataset" not in st.session_state:
             st.warning("Por favor, procesa los modelos para cargar el dataset original.")
         else:
             df_original = st.session_state["original_dataset"]
-
-            # (1) KPIs: Conteo de servidores por estado
+            # KPIs: Conteo de servidores por estado
             if "Estado del Sistema" in df_original.columns:
                 total_counts = df_original["Estado del Sistema"].value_counts().reset_index()
                 total_counts.columns = ["Estado", "Cantidad"]
-
                 col1, col2, col3, col4 = st.columns(4)
                 count_critico = total_counts.loc[total_counts["Estado"]=="Crítico", "Cantidad"].values[0] if "Crítico" in total_counts["Estado"].values else 0
                 count_advertencia = total_counts.loc[total_counts["Estado"]=="Advertencia", "Cantidad"].values[0] if "Advertencia" in total_counts["Estado"].values else 0
                 count_normal = total_counts.loc[total_counts["Estado"]=="Normal", "Cantidad"].values[0] if "Normal" in total_counts["Estado"].values else 0
                 count_inactivo = total_counts.loc[total_counts["Estado"]=="Inactivo", "Cantidad"].values[0] if "Inactivo" in total_counts["Estado"].values else 0
-
                 col1.metric("Crítico", f"{count_critico}")
                 col2.metric("Advertencia", f"{count_advertencia}")
                 col3.metric("Normal", f"{count_normal}")
                 col4.metric("Inactivo", f"{count_inactivo}")
-
-                # (2) Distribución de Estados (Pie Chart)
+                # Distribución de Estados (Pie Chart)
                 st.markdown("#### Distribución de Estados")
-                fig_pie = px.pie(total_counts, values="Cantidad", names="Estado", title="Distribución de Estados del Sistema (Real)")
+                fig_pie = px.pie(total_counts, values="Cantidad", names="Estado", title="Distribución de Estados (Real)")
                 st.plotly_chart(fig_pie, use_container_width=True)
-
-                # (3) Evolución de Estados en el Tiempo (Line Chart)
+                # Evolución de Estados en el Tiempo (Line Chart)
                 if "Fecha" in df_original.columns:
                     df_time = df_original.groupby(["Fecha","Estado del Sistema"]).size().reset_index(name="Conteo")
                     fig_line = px.line(df_time, x="Fecha", y="Conteo", color="Estado del Sistema", title="Evolución de Estados en el Tiempo (Real)")
                     st.plotly_chart(fig_line, use_container_width=True)
-
-                # (4) Gráfico de dispersión: Uso CPU vs Temperatura
+                # Relación entre Uso CPU y Temperatura (Scatter Plot)
                 if "Uso CPU (%)" in df_original.columns and "Temperatura (°C)" in df_original.columns:
                     st.markdown("#### Relación entre Uso de CPU y Temperatura")
                     fig_scatter = px.scatter(df_original, x="Uso CPU (%)", y="Temperatura (°C)",
                                              color="Estado del Sistema",
                                              title="Uso CPU vs Temperatura (Real)")
                     st.plotly_chart(fig_scatter, use_container_width=True)
-
-                # (5) Boxplots para identificar outliers
+                # Boxplot para Outliers
                 st.markdown("#### Análisis de Outliers")
                 fig_box, ax = plt.subplots(figsize=(8, 5))
                 df_box = df_original[["Uso CPU (%)", "Temperatura (°C)"]].dropna()
                 sns.boxplot(data=df_box, ax=ax)
-                ax.set_title("Boxplot de Uso CPU (%) y Temperatura (°C)")
+                ax.set_title("Boxplot de Uso CPU y Temperatura (Real)")
                 st.pyplot(fig_box)
-
-                # (6) Matriz de correlación
+                # Matriz de Correlación
                 st.markdown("#### Matriz de Correlación")
                 numeric_cols = df_original.select_dtypes(include=[np.number])
                 if not numeric_cols.empty:
                     corr_matrix = numeric_cols.corr()
-                    fig_corr = px.imshow(corr_matrix, text_auto=True, aspect="auto",
-                                         title="Matriz de Correlación (Real)",
-                                         labels=dict(color="Correlación"))
+                    fig_corr = px.imshow(corr_matrix, text_auto=True, aspect="auto", title="Matriz de Correlación (Real)")
                     st.plotly_chart(fig_corr, use_container_width=True)
-
-    # -------- Subpestaña 2: Resultados de la Clasificación --------
+    
+    # -------- Subpestaña B: Resultados de la Clasificación --------
     with sub_tab2:
         st.markdown("### Resultados de la Clasificación (Dataset Ganador)")
         if "best_dataset" not in st.session_state:
             st.warning("No se ha definido un dataset ganador. Procesa los modelos primero.")
         else:
             df_ganador = st.session_state["best_dataset"]
-
-            # (1) Distribución de Estados (Pie Chart)
+            # Distribución de Estados (Pie Chart)
             if "Estado del Sistema" in df_ganador.columns:
                 total_counts_ganador = df_ganador["Estado del Sistema"].value_counts().reset_index()
                 total_counts_ganador.columns = ["Estado", "Cantidad"]
                 fig_pie_ganador = px.pie(total_counts_ganador, values="Cantidad", names="Estado",
                                          title="Distribución de Estados (Clasificación)")
                 st.plotly_chart(fig_pie_ganador, use_container_width=True)
-
-            # (2) KPIs: Conteo de servidores por estado (Clasificación)
+            # KPIs: Conteo de servidores por estado
             col1g, col2g, col3g, col4g = st.columns(4)
             count_c_critico = total_counts_ganador.loc[total_counts_ganador["Estado"]=="Crítico", "Cantidad"].values[0] if "Crítico" in total_counts_ganador["Estado"].values else 0
             count_c_advertencia = total_counts_ganador.loc[total_counts_ganador["Estado"]=="Advertencia", "Cantidad"].values[0] if "Advertencia" in total_counts_ganador["Estado"].values else 0
             count_c_normal = total_counts_ganador.loc[total_counts_ganador["Estado"]=="Normal", "Cantidad"].values[0] if "Normal" in total_counts_ganador["Estado"].values else 0
             count_c_inactivo = total_counts_ganador.loc[total_counts_ganador["Estado"]=="Inactivo", "Cantidad"].values[0] if "Inactivo" in total_counts_ganador["Estado"].values else 0
-
             col1g.metric("Crítico (Clasif.)", f"{count_c_critico}")
             col2g.metric("Advertencia (Clasif.)", f"{count_c_advertencia}")
             col3g.metric("Normal (Clasif.)", f"{count_c_normal}")
             col4g.metric("Inactivo (Clasif.)", f"{count_c_inactivo}")
+            
+            # NUEVAS VISUALIZACIONES: Importancia de Variables
+            st.markdown("#### Importancia de Variables del Modelo Ganador")
+            if "trained_models" in st.session_state and st.session_state["best_model"] in st.session_state["trained_models"]:
+                model = st.session_state["trained_models"][st.session_state["best_model"]]
+                if hasattr(model, "feature_importances_"):
+                    importances = model.feature_importances_
+                    features = st.session_state.get("feature_names", [])
+                    if features:
+                        df_imp = pd.DataFrame({"Variable": features, "Importancia": importances})
+                        df_imp = df_imp.sort_values("Importancia", ascending=True)
+                        fig_bar = px.bar(df_imp, x="Importancia", y="Variable", orientation="h",
+                                         title="Importancia de Variables")
+                        st.plotly_chart(fig_bar, use_container_width=True)
+                    else:
+                        st.info("No se encontraron nombres de variables.")
+                else:
+                    st.info("El modelo ganador no proporciona importancias de variables.")
+            else:
+                st.info("No se ha almacenado el modelo ganador.")
 
-            # (3) Importancia de Variables (solo si se desea mostrar la del modelo ganador, p.ej. RandomForest)
-            # NOTA: Para mostrar la importancia real de variables se necesitaría almacenar el modelo entrenado.
-            # Ejemplo: st.session_state["trained_models"][best_model].feature_importances_
-            st.info("Ejemplo de lugar para mostrar la importancia de variables del modelo ganador (no implementado).")
-
-            # (4) Análisis de Outliers (Clasificación)
-            st.markdown("#### Análisis de Outliers (Clasificación)")
-            fig_box2, ax2 = plt.subplots(figsize=(8, 5))
-            df_box2 = df_ganador[["Uso CPU (%)", "Temperatura (°C)"]].dropna()
-            sns.boxplot(data=df_box2, ax=ax2)
-            ax2.set_title("Boxplot de Uso CPU (%) y Temperatura (°C) - Dataset Ganador")
-            st.pyplot(fig_box2)
-
-            # (5) Matriz de Correlación (Clasificación)
-            st.markdown("#### Matriz de Correlación (Dataset Ganador)")
-            numeric_cols_g = df_ganador.select_dtypes(include=[np.number])
-            if not numeric_cols_g.empty:
-                corr_matrix_g = numeric_cols_g.corr()
-                fig_corr_g = px.imshow(corr_matrix_g, text_auto=True, aspect="auto",
-                                       title="Matriz de Correlación (Clasificación)",
-                                       labels=dict(color="Correlación"))
-                st.plotly_chart(fig_corr_g, use_container_width=True)
-
-            # (6) Visualización Opcional de Pronósticos
-            st.info("Aquí podrías añadir proyecciones o pronósticos basados en el dataset ganador, "
-                    "por ejemplo, una regresión para estimar temperatura futura o estado del sistema.")
-
-
+            # NUEVAS VISUALIZACIONES: Pronóstico de Temperatura Futura
+            st.markdown("#### Pronóstico de Temperatura Futura")
+            if "Temperatura (°C)" in df_ganador.columns and "Fecha" in df_ganador.columns:
+                forecast_df = predecir_temperatura_futura(df_ganador, horizon=7)
+                fig_forecast = px.line(forecast_df, x="Fecha", y="Temperatura Predicha (°C)",
+                                       title="Pronóstico de Temperatura Futura (Próximos 7 días)")
+                st.plotly_chart(fig_forecast, use_container_width=True)
+            else:
+                st.info("No se dispone de las columnas necesarias para el pronóstico.")
