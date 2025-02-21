@@ -11,128 +11,140 @@ import boto3
 from chatterbot import ChatBot
 from chatterbot.trainers import ChatterBotCorpusTrainer
 
-# 📌 Configuración del Cliente de Google Cloud Storage
+# 1. Configuraciones iniciales optimizadas
 BUCKET_NAME = "monitoreo_gcp_bucket"
+S3_BUCKET_NAME = "tfm-monitoring-data"
 ARCHIVO_DATOS = "dataset_monitoreo_servers.csv"
 
-# 📌 Configuración de AWS S3
-S3_BUCKET_NAME = "tfm-monitoring-data"
-
-# Diccionario con los nombres de los datasets procesados para cada modelo
 ARCHIVOS_PROCESADOS = {
     "Árbol de Decisión": "dataset_procesado_arbol_decision.csv",
     "Regresión Logística": "dataset_procesado_regresion_logistica.csv",
     "Random Forest": "dataset_procesado_random_forest.csv"
 }
 
-# Inicializar cliente de Google Cloud Storage
-storage_client = storage.Client()
-bucket = storage_client.bucket(BUCKET_NAME)
-
-# 📌 Inicializar y Entrenar el Chatbot
+# 2. Clientes de cloud inicializados una sola vez
 @st.cache_resource
-def iniciar_chatbot():
+def init_cloud_clients():
+    return {
+        "gcp": storage.Client().bucket(BUCKET_NAME),
+        "s3": boto3.client("s3")
+    }
+
+clients = init_cloud_clients()
+
+# 3. Chatbot optimizado con caché
+@st.cache_resource
+def init_chatbot():
     bot = ChatBot("Soporte TI")
     trainer = ChatterBotCorpusTrainer(bot)
-    trainer.train("chatterbot.corpus.spanish")  # 📌 Entrena con el corpus en español
+    trainer.train("chatterbot.corpus.spanish")
     return bot
 
-chatbot = iniciar_chatbot()
+chatbot = init_chatbot()
 
-# 📌 Función para cargar los datos desde GCP Storage
+# 4. Carga de datos más eficiente
 @st.cache_data
 def cargar_datos():
     try:
-        blob = bucket.blob(ARCHIVO_DATOS)
-        contenido = blob.download_as_text()
-        df = pd.read_csv(StringIO(contenido))
-        return df
+        blob = clients["gcp"].blob(ARCHIVO_DATOS)
+        return pd.read_csv(StringIO(blob.download_as_text()))
     except Exception as e:
-        st.error(f"❌ Error al descargar el archivo desde GCP: {e}")
-        return None
+        st.error(f"Error al cargar datos: {str(e)}")
+        st.stop()
 
 df = cargar_datos()
-if df is None:
-    st.stop()
 
-# 📌 Función para procesar los datos (por modelo)
-def procesar_datos(df, modelo):
-    df_procesado = df.copy()
-    df_procesado["Fecha"] = pd.to_datetime(df_procesado["Fecha"], errors="coerce")
-    df_procesado.drop_duplicates(inplace=True)
-    df_procesado.dropna(inplace=True)
+# 5. Procesamiento unificado de datos
+def procesar_datos(df):
+    df = df.copy()
+    
+    # Limpieza básica
+    df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
+    df = df.dropna().drop_duplicates()
+    
+    # Codificación más eficiente
     estado_mapping = {"Inactivo": 0, "Normal": 1, "Advertencia": 2, "Crítico": 3}
-    df_procesado["Estado del Sistema Codificado"] = df_procesado["Estado del Sistema"].map(estado_mapping)
-    df_procesado = pd.get_dummies(df_procesado, columns=["Tipo de Servidor"], prefix="Servidor", drop_first=True)
+    df["Estado Codificado"] = df["Estado del Sistema"].map(estado_mapping)
+    
+    # Normalización optimizada
     scaler = MinMaxScaler()
-    metricas_continuas = ["Uso CPU (%)", "Temperatura (°C)", "Carga de Red (MB/s)", "Latencia Red (ms)"]
-    df_procesado[metricas_continuas] = scaler.fit_transform(df_procesado[metricas_continuas])
-    return df_procesado
+    metricas = ["Uso CPU (%)", "Temperatura (°C)", "Carga de Red (MB/s)", "Latencia Red (ms)"]
+    df[metricas] = scaler.fit_transform(df[metricas])
+    
+    # One-Hot Encoding más eficiente
+    return pd.get_dummies(df, columns=["Tipo de Servidor"], prefix="Servidor")
 
-# 📌 Estado de datos procesados
+# 6. Gestión centralizada de datos procesados
 if "datos_procesados" not in st.session_state:
-    st.session_state["datos_procesados"] = {}
+    st.session_state.datos_procesados = {}
 
-# 📌 Función para subir a S3
+# 7. Funciones de exportación mejoradas
+def exportar_datos(modelo):
+    try:
+        df_procesado = st.session_state.datos_procesados.get(modelo)
+        if df_procesado is None:
+            raise ValueError("Datos no encontrados")
+            
+        blob = clients["gcp"].blob(ARCHIVOS_PROCESADOS[modelo])
+        blob.upload_from_string(df_procesado.to_csv(index=False), "text/csv")
+        st.success(f"Datos de {modelo} guardados en GCP!")
+    except Exception as e:
+        st.error(f"Error en GCP: {str(e)}")
+
 def subir_a_s3(modelo):
     try:
-        archivo_salida = ARCHIVOS_PROCESADOS[modelo]
-        S3_FILE_NAME = archivo_salida
-        s3_client = boto3.client("s3")
-        blob_procesado = bucket.blob(archivo_salida)
-        contenido = blob_procesado.download_as_bytes()
-        s3_client.put_object(Bucket=S3_BUCKET_NAME, Key=S3_FILE_NAME, Body=contenido)
-        st.success(f"✅ Datos de {modelo} enviados a S3: s3://{S3_BUCKET_NAME}/{S3_FILE_NAME}")
+        df_procesado = st.session_state.datos_procesados.get(modelo)
+        if df_procesado is None:
+            raise ValueError("Datos no encontrados")
+            
+        clients["s3"].put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=ARCHIVOS_PROCESADOS[modelo],
+            Body=df_procesado.to_csv(index=False)
+        )
+        st.success(f"Datos de {modelo} enviados a S3!")
     except Exception as e:
-        st.error(f"❌ Error al enviar datos a S3: {e}")
+        st.error(f"Error en S3: {str(e)}")
 
-# 📌 SECCIÓN: INTERFAZ EN STREAMLIT
+# 8. Interfaz de usuario reorganizada
 st.header("📊 Comparación de Modelos de Clasificación")
+tabs = st.tabs([*ARCHIVOS_PROCESADOS.keys(), "🤖 ChatBot de Soporte"])
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🌳 Árbol de Decisión",
-    "📈 Regresión Logística",
-    "🌲 Random Forest",
-    "🤖 ChatBot de Soporte"
-])
-
-for tab, modelo in zip([tab1, tab2, tab3], ARCHIVOS_PROCESADOS.keys()):
-    with tab:
-        st.subheader(f"{modelo}")
-
-        if st.button(f"⚙️ Procesar Datos para {modelo}"):
-            df_procesado = procesar_datos(df, modelo)
-            st.session_state["datos_procesados"][modelo] = df_procesado
-            st.success(f"✅ Datos procesados correctamente para {modelo}.")
-
-        # 📌 Botón de exportación de datos a GCP
-        if modelo in st.session_state["datos_procesados"]:
-            def exportar_datos():
-                try:
-                    df_procesado = st.session_state["datos_procesados"][modelo]
-                    archivo_salida = ARCHIVOS_PROCESADOS[modelo]
-                    blob_procesado = bucket.blob(archivo_salida)
-                    blob_procesado.upload_from_string(df_procesado.to_csv(index=False), content_type="text/csv")
-                    st.success(f"✅ Datos de {modelo} exportados a {BUCKET_NAME}/{archivo_salida}")
-                except Exception as e:
-                    st.error(f"❌ Error al exportar datos a GCP: {e}")
-
-            if st.button(f"📤 Guardar Datos de {modelo} en GCP"):
-                exportar_datos()
-
-                if st.button(f"🚀 Enviar Datos de {modelo} a S3"):
+for i, modelo in enumerate(ARCHIVOS_PROCESADOS):
+    with tabs[i]:
+        st.subheader(modelo)
+        
+        # Sección de procesamiento
+        if st.button(f"⚙️ Procesar datos para {modelo}"):
+            st.session_state.datos_procesados[modelo] = procesar_datos(df)
+            st.success("Datos procesados correctamente!")
+        
+        # Sección de exportación
+        if modelo in st.session_state.datos_procesados:
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(f"📤 GCP - {modelo}"):
+                    exportar_datos(modelo)
+            with col2:
+                if st.button(f"🚀 S3 - {modelo}"):
                     subir_a_s3(modelo)
 
-# 📌 NUEVA SECCIÓN: CHATBOT DE SOPORTE
-with tab4:
-    st.subheader("🤖 ChatBot de Soporte para Infraestructura TI")
-    st.write("Puedes preguntarme sobre el monitoreo de servidores, modelos de clasificación y más.")
-
-    # 📌 Entrada de usuario y respuesta del chatbot
-    user_input = st.text_input("💬 Escribe tu pregunta:", "")
-    if st.button("Enviar"):
-        if user_input:
-            respuesta = chatbot.get_response(user_input)
-            st.text_area("🤖 Respuesta:", value=str(respuesta), height=100)
-        else:
-            st.warning("⚠️ Escribe una pregunta antes de enviar.")
+# 9. Chatbot mejorado
+with tabs[-1]:
+    st.subheader("🤖 ChatBot de Soporte TI")
+    
+    # Historial de conversación
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+    
+    # Mostrar historial
+    for msg in st.session_state.chat_history:
+        st.markdown(f"**{msg['role']}:** {msg['content']}")
+    
+    # Entrada de usuario
+    user_input = st.text_input("Escribe tu pregunta:", key="user_input")
+    if st.button("Enviar") and user_input:
+        response = chatbot.get_response(user_input)
+        st.session_state.chat_history.append({"role": "Usuario", "content": user_input})
+        st.session_state.chat_history.append({"role": "Asistente", "content": str(response)})
+        st.experimental_rerun()
