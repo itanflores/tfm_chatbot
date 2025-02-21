@@ -11,6 +11,9 @@
 #          B) Resultados de la Clasificación (dataset ganador, con visualizaciones de
 #             importancia de variables y pronósticos de temperatura).
 #
+#   Se incluye la función 'upload_to_s3' correctamente definida y utilizada, para
+#   evitar el error NameError.
+#
 # Version: 1.3.0
 # =============================================================================
 
@@ -57,6 +60,21 @@ ARCHIVOS_PROCESADOS = {
 storage_client = storage.Client()
 bucket_gcp = storage_client.bucket(BUCKET_GCP)
 s3_client = boto3.client("s3")
+
+# -----------------------------------------------------------------------------
+# Función para subir archivos a S3 (usada en el botón de descarga)
+# -----------------------------------------------------------------------------
+def upload_to_s3(file_content, file_name):
+    """
+    Sube el contenido del archivo a S3 y muestra un mensaje de éxito.
+    Asegúrate de que BUCKET_S3 esté configurado correctamente.
+    """
+    s3_client.put_object(
+        Bucket=BUCKET_S3,
+        Key=file_name,
+        Body=file_content
+    )
+    st.success(f"Archivo '{file_name}' enviado a S3 correctamente.")
 
 # -----------------------------------------------------------------------------
 # Función para cargar el dataset desde GCP
@@ -308,13 +326,16 @@ with tab_datasets:
         blob = bucket_gcp.blob(archivo_gcp_subir.name)
         blob.upload_from_file(archivo_gcp_subir)
         st.success(f"✅ Archivo '{archivo_gcp_subir.name}' subido a GCP ({BUCKET_GCP}) correctamente.")
+
     st.markdown("### ☁️ Subir un archivo CSV a Amazon S3")
     archivo_s3_subir = st.file_uploader("Selecciona un archivo CSV para S3", type=["csv"])
     if archivo_s3_subir and st.button("📤 Enviar a S3"):
         s3_client.upload_fileobj(archivo_s3_subir, BUCKET_S3, archivo_s3_subir.name)
         st.success(f"✅ Archivo '{archivo_s3_subir.name}' subido a S3 ({BUCKET_S3}) correctamente.")
+
     if st.button("⚙️ Procesar Modelos"):
         entrenar_modelos()
+
     if "processed_dfs" in st.session_state and st.session_state["processed_dfs"]:
         st.write("### Descarga y envío de los archivos procesados")
         for modelo, df_proc in st.session_state["processed_dfs"].items():
@@ -325,7 +346,7 @@ with tab_datasets:
                 data=csv_data,
                 file_name=archivo_salida,
                 mime="text/csv",
-                on_click=upload_to_s3,
+                on_click=upload_to_s3,  # Se usa la función definida al inicio
                 args=(csv_data, archivo_salida)
             )
 
@@ -357,15 +378,18 @@ with tab_dashboard:
                 col2.metric("Advertencia", f"{count_advertencia}")
                 col3.metric("Normal", f"{count_normal}")
                 col4.metric("Inactivo", f"{count_inactivo}")
+
                 # Distribución de Estados (Pie Chart)
                 st.markdown("#### Distribución de Estados")
                 fig_pie = px.pie(total_counts, values="Cantidad", names="Estado", title="Distribución de Estados (Real)")
                 st.plotly_chart(fig_pie, use_container_width=True)
+
                 # Evolución de Estados en el Tiempo (Line Chart)
                 if "Fecha" in df_original.columns:
                     df_time = df_original.groupby(["Fecha","Estado del Sistema"]).size().reset_index(name="Conteo")
                     fig_line = px.line(df_time, x="Fecha", y="Conteo", color="Estado del Sistema", title="Evolución de Estados en el Tiempo (Real)")
                     st.plotly_chart(fig_line, use_container_width=True)
+
                 # Relación entre Uso CPU y Temperatura (Scatter Plot)
                 if "Uso CPU (%)" in df_original.columns and "Temperatura (°C)" in df_original.columns:
                     st.markdown("#### Relación entre Uso de CPU y Temperatura")
@@ -373,6 +397,7 @@ with tab_dashboard:
                                              color="Estado del Sistema",
                                              title="Uso CPU vs Temperatura (Real)")
                     st.plotly_chart(fig_scatter, use_container_width=True)
+
                 # Boxplot para Outliers
                 st.markdown("#### Análisis de Outliers")
                 fig_box, ax = plt.subplots(figsize=(8, 5))
@@ -380,6 +405,7 @@ with tab_dashboard:
                 sns.boxplot(data=df_box, ax=ax)
                 ax.set_title("Boxplot de Uso CPU y Temperatura (Real)")
                 st.pyplot(fig_box)
+
                 # Matriz de Correlación
                 st.markdown("#### Matriz de Correlación")
                 numeric_cols = df_original.select_dtypes(include=[np.number])
@@ -402,18 +428,20 @@ with tab_dashboard:
                 fig_pie_ganador = px.pie(total_counts_ganador, values="Cantidad", names="Estado",
                                          title="Distribución de Estados (Clasificación)")
                 st.plotly_chart(fig_pie_ganador, use_container_width=True)
-            # KPIs: Conteo de servidores por estado
+
+            # KPIs: Conteo de servidores por estado (Clasificación)
             col1g, col2g, col3g, col4g = st.columns(4)
             count_c_critico = total_counts_ganador.loc[total_counts_ganador["Estado"]=="Crítico", "Cantidad"].values[0] if "Crítico" in total_counts_ganador["Estado"].values else 0
             count_c_advertencia = total_counts_ganador.loc[total_counts_ganador["Estado"]=="Advertencia", "Cantidad"].values[0] if "Advertencia" in total_counts_ganador["Estado"].values else 0
             count_c_normal = total_counts_ganador.loc[total_counts_ganador["Estado"]=="Normal", "Cantidad"].values[0] if "Normal" in total_counts_ganador["Estado"].values else 0
             count_c_inactivo = total_counts_ganador.loc[total_counts_ganador["Estado"]=="Inactivo", "Cantidad"].values[0] if "Inactivo" in total_counts_ganador["Estado"].values else 0
+
             col1g.metric("Crítico (Clasif.)", f"{count_c_critico}")
             col2g.metric("Advertencia (Clasif.)", f"{count_c_advertencia}")
             col3g.metric("Normal (Clasif.)", f"{count_c_normal}")
             col4g.metric("Inactivo (Clasif.)", f"{count_c_inactivo}")
             
-            # NUEVAS VISUALIZACIONES: Importancia de Variables
+            # Visualización de Importancia de Variables
             st.markdown("#### Importancia de Variables del Modelo Ganador")
             if "trained_models" in st.session_state and st.session_state["best_model"] in st.session_state["trained_models"]:
                 model = st.session_state["trained_models"][st.session_state["best_model"]]
@@ -433,7 +461,7 @@ with tab_dashboard:
             else:
                 st.info("No se ha almacenado el modelo ganador.")
 
-            # NUEVAS VISUALIZACIONES: Pronóstico de Temperatura Futura
+            # Pronóstico de Temperatura Futura
             st.markdown("#### Pronóstico de Temperatura Futura")
             if "Temperatura (°C)" in df_ganador.columns and "Fecha" in df_ganador.columns:
                 forecast_df = predecir_temperatura_futura(df_ganador, horizon=7)
