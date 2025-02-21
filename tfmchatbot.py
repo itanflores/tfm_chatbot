@@ -14,7 +14,7 @@ import boto3
 # 📌 Configuración de los Buckets
 BUCKET_GCP = "monitoreo_gcp_bucket"
 BUCKET_S3 = "tfm-monitoring-data"
-ARCHIVO_DATOS = "dataset_monitoreo_servers_EJEMPLO.csv"
+ARCHIVO_DATOS = "dataset_monitoreo_servers.csv"
 
 # Diccionario con los nombres de los datasets procesados para cada modelo
 ARCHIVOS_PROCESADOS = {
