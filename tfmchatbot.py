@@ -1,15 +1,15 @@
 # =============================================================================
-# Name: streamlit_app_v1.1.py
+# Name: streamlit_app_v1.1.1.py
 # Description:
 #   Aplicación Streamlit con dos pestañas:
 #     1) ChatBot de Soporte TI: responde preguntas sobre el dataset utilizando
 #        únicamente el modelo que obtuvo la mejor precisión.
 #     2) Cargar y Enviar Datasets: permite subir archivos CSV a GCP y S3, 
 #        entrenar los modelos y descargar los resultados procesados.
-#   Esta versión incorpora actualizaciones para homogeneizar el método de preprocesamiento
-#   y modelado, siguiendo las recomendaciones del análisis previo, y excluye secciones
-#   de visualización.
-# Version: 1.1.0
+#   Esta versión:
+#     - Ajusta la variable ARCHIVO_DATOS a "dataset_monitoreo_servers.csv"
+#     - Incrementa max_iter en la regresión logística para evitar warnings de convergencia.
+# Version: 1.1.1
 # =============================================================================
 
 import streamlit as st
@@ -28,11 +28,12 @@ import boto3
 # -----------------------------------------------------------------------------
 #                     CONFIGURACIÓN DE BUCKETS Y VARIABLES
 # -----------------------------------------------------------------------------
+
+# Se ha actualizado el nombre del archivo al solicitado: "dataset_monitoreo_servers.csv"
 BUCKET_GCP = "monitoreo_gcp_bucket"
 BUCKET_S3 = "tfm-monitoring-data"
 ARCHIVO_DATOS = "dataset_monitoreo_servers.csv"
 
-# Se definen los nombres de archivo de salida para cada modelo.
 ARCHIVOS_PROCESADOS = {
     "Árbol de Decisión": "dataset_procesado_arbol_decision.csv",
     "Regresión Logística": "dataset_procesado_regresion_logistica.csv",
@@ -88,7 +89,6 @@ def procesar_datos(df, modelo):
     if "Estado del Sistema" in df_procesado.columns:
         estado_mapping = {"Inactivo": 0, "Normal": 1, "Advertencia": 2, "Crítico": 3}
         df_procesado["Estado del Sistema Codificado"] = df_procesado["Estado del Sistema"].map(estado_mapping)
-        # Uso de asignación directa para evitar warnings (homogeneización con el script de backup)
         df_procesado["Estado del Sistema Codificado"] = df_procesado["Estado del Sistema Codificado"].fillna(-1)
     else:
         st.error("⚠️ La columna 'Estado del Sistema' no está en el dataset.")
@@ -143,10 +143,11 @@ def entrenar_modelos():
             )
 
             # Seleccionar y entrenar el modelo correspondiente
+            # Se incrementa max_iter en LogisticRegression para evitar warnings de convergencia
             if modelo == "Árbol de Decisión":
                 clf = DecisionTreeClassifier(random_state=42)
             elif modelo == "Regresión Logística":
-                clf = LogisticRegression(max_iter=1000, random_state=42)
+                clf = LogisticRegression(max_iter=3000, random_state=42)  # Aumentamos max_iter
             else:
                 clf = RandomForestClassifier(random_state=42, n_jobs=-1)
 
