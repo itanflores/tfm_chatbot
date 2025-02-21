@@ -10,43 +10,44 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import accuracy_score
-from chatterbot import ChatBot
-from chatterbot.trainers import ListTrainer
 
-# 📌 Configuración del Cliente de Google Cloud Storage
-BUCKET_NAME_GCP = "monitoreo_gcp_bucket"
-BUCKET_NAME_S3 = "tfm-monitoring-data"
+# 📌 Configuración de Google Cloud Storage
+BUCKET_NAME = "monitoreo_gcp_bucket"
 ARCHIVO_DATOS = "dataset_monitoreo_servers.csv"
-
-# Diccionario con los nombres de los datasets procesados para cada modelo
 ARCHIVOS_PROCESADOS = {
     "Árbol de Decisión": "dataset_procesado_arbol_decision.csv",
     "Regresión Logística": "dataset_procesado_regresion_logistica.csv",
     "Random Forest": "dataset_procesado_random_forest.csv"
 }
 
-# Inicializar clientes de almacenamiento
-storage_client = storage.Client()
-bucket_gcp = storage_client.bucket(BUCKET_NAME_GCP)
-
+# 📌 Configuración de AWS S3
+AWS_BUCKET_NAME = "tfm-monitoring-data"
 s3_client = boto3.client("s3")
 
+# 📌 Inicializar cliente de Google Cloud Storage
+storage_client = storage.Client()
+bucket = storage_client.bucket(BUCKET_NAME)
+
+# 📌 Estado de procesamiento de datos
+if "datos_procesados" not in st.session_state:
+    st.session_state["datos_procesados"] = {}
+if "modelos_listos" not in st.session_state:
+    st.session_state["modelos_listos"] = False
+
 # 📌 Función para cargar datos desde GCP
-@st.cache_data
 def cargar_datos():
     try:
-        blob = bucket_gcp.blob(ARCHIVO_DATOS)
+        blob = bucket.blob(ARCHIVO_DATOS)
         contenido = blob.download_as_text()
         df = pd.read_csv(StringIO(contenido))
         return df
     except Exception as e:
-        st.error(f"❌ Error al cargar el archivo desde GCP: {e}")
+        st.error(f"🚨 Error al descargar el dataset: {e}")
         return None
 
-# 📌 Función para procesar los datos para cada modelo
+# 📌 Función para procesar los datos
 def procesar_datos(df, modelo):
     df_procesado = df.copy()
-    
     df_procesado["Fecha"] = pd.to_datetime(df_procesado["Fecha"], errors="coerce")
     df_procesado.drop_duplicates(inplace=True)
     df_procesado.dropna(inplace=True)
@@ -54,97 +55,110 @@ def procesar_datos(df, modelo):
     estado_mapping = {"Inactivo": 0, "Normal": 1, "Advertencia": 2, "Crítico": 3}
     df_procesado["Estado del Sistema Codificado"] = df_procesado["Estado del Sistema"].map(estado_mapping)
     
-    df_procesado = pd.get_dummies(df_procesado, columns=["Tipo de Servidor"], drop_first=True)
+    df_procesado = pd.get_dummies(df_procesado, columns=["Tipo de Servidor"], prefix="Servidor", drop_first=True)
     
     scaler = MinMaxScaler()
-    metricas = ["Uso CPU (%)", "Temperatura (°C)", "Carga de Red (MB/s)", "Latencia Red (ms)"]
-    
+    metricas_continuas = ["Uso CPU (%)", "Temperatura (°C)", "Carga de Red (MB/s)", "Latencia Red (ms)"]
+
     if modelo == "Regresión Logística":
-        df_procesado[metricas] = (df_procesado[metricas] - df_procesado[metricas].mean()) / df_procesado[metricas].std()
+        df_procesado[metricas_continuas] = (df_procesado[metricas_continuas] - df_procesado[metricas_continuas].mean()) / df_procesado[metricas_continuas].std()
     else:
-        df_procesado[metricas] = scaler.fit_transform(df_procesado[metricas])
-    
+        df_procesado[metricas_continuas] = scaler.fit_transform(df_procesado[metricas_continuas])
+
     return df_procesado
 
-# 📌 Procesamiento automático después de subir a GCP
-if "datos_procesados" not in st.session_state:
-    st.session_state["datos_procesados"] = {}
-
-df = cargar_datos()
-if df is not None and not df.empty:
-    for modelo in ARCHIVOS_PROCESADOS.keys():
-        df_procesado = procesar_datos(df, modelo)
+# 📌 Procesamiento de modelos
+def entrenar_modelos():
+    df = cargar_datos()
+    if df is None:
+        return
+    
+    modelos = {
+        "Árbol de Decisión": DecisionTreeClassifier(max_depth=5),
+        "Regresión Logística": LogisticRegression(max_iter=50, n_jobs=-1),
+        "Random Forest": RandomForestClassifier(n_estimators=50, max_depth=10, n_jobs=-1, random_state=42)
+    }
+    
+    X = df.drop(["Estado del Sistema", "Estado del Sistema Codificado", "Fecha", "Hostname"], axis=1, errors="ignore")
+    y = df["Estado del Sistema Codificado"]
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+    
+    for modelo, clf in modelos.items():
+        st.write(f"🔄 Entrenando {modelo}...")
+        clf.fit(X_train, y_train)
+        y_pred = clf.predict(X_test)
+        precision = accuracy_score(y_test, y_pred)
+        
+        st.session_state["datos_procesados"][modelo] = procesar_datos(df, modelo)
+        
         archivo_salida = ARCHIVOS_PROCESADOS[modelo]
-        blob = bucket_gcp.blob(archivo_salida)
-        blob.upload_from_string(df_procesado.to_csv(index=False), content_type="text/csv")
-        st.session_state["datos_procesados"][modelo] = df_procesado
-else:
-    st.error("❌ No se pudo cargar el dataset o está vacío.")
+        blob_procesado = bucket.blob(archivo_salida)
+        blob_procesado.upload_from_string(st.session_state["datos_procesados"][modelo].to_csv(index=False), content_type="text/csv")
+        
+        st.success(f"✅ {modelo} entrenado con precisión {precision:.2%}. Datos guardados en {archivo_salida}")
+    
+    st.session_state["modelos_listos"] = True
+    st.success("🚀 Todos los modelos han sido entrenados y los datasets han sido generados.")
 
+# 📌 Función para subir archivos a AWS S3
+def subir_a_s3(archivo):
+    try:
+        s3_client.upload_fileobj(archivo, AWS_BUCKET_NAME, archivo.name)
+        st.success(f"✅ Archivo '{archivo.name}' subido a S3 ({AWS_BUCKET_NAME}) correctamente.")
+    except Exception as e:
+        st.error(f"❌ Error al subir archivo a S3: {e}")
 
-# 📌 Chatbot solo se activa si los datasets están procesados
-datasets_cargados = all(modelo in st.session_state["datos_procesados"] for modelo in ARCHIVOS_PROCESADOS.keys())
+# 📌 UI Streamlit
+st.title("📊 Comparación de Modelos de Clasificación")
 
-# 📌 SECCIÓN: COMPARACIÓN DE MODELOS
-st.header("📊 Comparación de Modelos de Clasificación")
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🌳 Árbol de Decisión", "📈 Regresión Logística", "🌲 Random Forest", "🤖 ChatBot de Soporte", "📂 Cargar y Enviar Datasets"])
+tabs = st.tabs(["🌳 Árbol de Decisión", "📈 Regresión Logística", "🌲 Random Forest", "🤖 ChatBot de Soporte", "📂 Cargar y Enviar Datasets"])
 
-# 📌 Sección para cada modelo
-for tab, modelo in zip([tab1, tab2, tab3], ARCHIVOS_PROCESADOS.keys()):
+# 📌 Sección Modelos
+for tab, modelo in zip(tabs[:3], ARCHIVOS_PROCESADOS.keys()):
     with tab:
         st.subheader(modelo)
-        st.write(f"Aquí se mostrarán los resultados del modelo de {modelo}.")
+        if st.session_state["modelos_listos"]:
+            st.success(f"✅ {modelo} listo para análisis.")
+        else:
+            st.warning("⚠️ Los modelos aún no han sido procesados.")
 
-# 📌 Sección del ChatBot
-with tab4:
+# 📌 Sección Chatbot (Solo si los modelos están listos)
+with tabs[3]:
     st.subheader("🤖 ChatBot de Soporte TI")
-    
-    if datasets_cargados:
-        chatbot = ChatBot("Soporte TI")
-        trainer = ListTrainer(chatbot)
-
-        preguntas_respuestas = [
-            ("¿Cuántos servidores están en estado crítico?", "Déjame revisar los datos..."),
-            ("¿Cuántos registros tiene el dataset?", f"El dataset tiene {len(df)} registros."),
-            ("¿Cuál es la temperatura promedio de los servidores?", f"La temperatura promedio es {df['Temperatura (°C)'].mean():.2f}°C.")
-        ]
-
-        for pregunta, respuesta in preguntas_respuestas:
-            trainer.train([pregunta, respuesta])
-
-        pregunta_usuario = st.text_input("Escribe tu pregunta:")
-
-        if st.button("Enviar"):
-            respuesta = chatbot.get_response(pregunta_usuario)
-            st.text_area("🤖 Respuesta:", value=str(respuesta), height=100)
+    if not st.session_state["modelos_listos"]:
+        st.warning("⚠️ El ChatBot se activará después de procesar los modelos.")
     else:
-        st.warning("⚠️ El ChatBot se activará cuando los datos estén procesados.")
+        pregunta = st.text_input("Escribe tu pregunta:")
+        if st.button("Enviar"):
+            if "temperatura" in pregunta.lower():
+                temperatura_promedio = st.session_state["datos_procesados"]["Random Forest"]["Temperatura (°C)"].mean()
+                st.write(f"🌡 La temperatura promedio de los servidores es {temperatura_promedio:.2f}°C.")
+            else:
+                st.write("🤖 Lo siento, aún estoy aprendiendo. Intenta otra pregunta.")
 
-# 📌 Sección para carga y envío de datasets
-with tab5:
+# 📌 Sección Cargar y Enviar Datasets
+with tabs[4]:
     st.subheader("📂 Cargar y Enviar Datasets")
     
-    sub_tab1, sub_tab2 = st.tabs(["☁️ Subir a GCP", "🌤 Subir a S3"])
+    opciones = st.radio("Selecciona destino:", ["Subir a GCP", "Subir a S3"])
     
-    with sub_tab1:
-        st.subheader("☁️ Subir un archivo CSV a GCP")
-        archivo_gcp = st.file_uploader("Selecciona un archivo CSV para GCP", type=["csv"])
+    archivo_subido = st.file_uploader("📤 Sube un archivo CSV", type="csv")
+    
+    if archivo_subido:
+        df_vista = pd.read_csv(archivo_subido)
+        st.dataframe(df_vista.head())
         
-        if archivo_gcp and st.button("📤 Enviar a GCP"):
-            try:
-                blob = bucket_gcp.blob(archivo_gcp.name)
-                blob.upload_from_string(archivo_gcp.getvalue(), content_type="text/csv")
-                st.success(f"✅ Archivo '{archivo_gcp.name}' subido a GCP ({BUCKET_NAME_GCP}) correctamente.")
-            except Exception as e:
-                st.error(f"❌ Error al subir el archivo a GCP: {e}")
+        if opciones == "Subir a GCP":
+            if st.button("Enviar a GCP"):
+                blob = bucket.blob(archivo_subido.name)
+                blob.upload_from_string(archivo_subido.getvalue(), content_type="text/csv")
+                st.success(f"✅ Archivo '{archivo_subido.name}' subido a GCP ({BUCKET_NAME}) correctamente.")
+        
+        elif opciones == "Subir a S3":
+            if st.button("Enviar a S3"):
+                subir_a_s3(archivo_subido)
 
-    with sub_tab2:
-        st.subheader("🌤 Subir un archivo CSV a Amazon S3")
-        archivo_s3 = st.file_uploader("Selecciona un archivo CSV para S3", type=["csv"])
-
-        if archivo_s3 and st.button("📤 Enviar a S3"):
-            try:
-                s3_client.upload_fileobj(archivo_s3, BUCKET_NAME_S3, archivo_s3.name)
-                st.success(f"✅ Archivo '{archivo_s3.name}' subido a S3 ({BUCKET_NAME_S3}) correctamente.")
-            except Exception as e:
-                st.error(f"❌ Error al subir el archivo a S3: {e}")
+# 📌 Botón para procesar modelos
+if st.button("⚙️ Procesar Modelos"):
+    entrenar_modelos()
