@@ -71,13 +71,16 @@ if "datos_procesados" not in st.session_state:
     st.session_state["datos_procesados"] = {}
 
 df = cargar_datos()
-if df:
+if df is not None and not df.empty:
     for modelo in ARCHIVOS_PROCESADOS.keys():
         df_procesado = procesar_datos(df, modelo)
         archivo_salida = ARCHIVOS_PROCESADOS[modelo]
         blob = bucket_gcp.blob(archivo_salida)
         blob.upload_from_string(df_procesado.to_csv(index=False), content_type="text/csv")
         st.session_state["datos_procesados"][modelo] = df_procesado
+else:
+    st.error("❌ No se pudo cargar el dataset o está vacío.")
+
 
 # 📌 Chatbot solo se activa si los datasets están procesados
 datasets_cargados = all(modelo in st.session_state["datos_procesados"] for modelo in ARCHIVOS_PROCESADOS.keys())
