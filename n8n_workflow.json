@@ -1,0 +1,83 @@
+{
+  "name": "Google Sheets Critical Update Notification",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerOn": "update",
+        "sheetId": "1DBhgnrDlBcqd3arhD9_cvWNUICDhcbqbJti4UlhnWoU",
+        "range": "Sheet1",
+        "watchInterval": 60
+      },
+      "name": "Google Sheets Trigger",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "id": "GoogleSheetsTrigger"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json[\"Prioridad\"]}}",
+              "operation": "equal",
+              "value2": "Crítica"
+            },
+            {
+              "value1": "={{$json[\"Estado\"]}}",
+              "operation": "equal",
+              "value2": "En proceso"
+            }
+          ]
+        }
+      },
+      "name": "Verificar Prioridad y Estado",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [540, 300],
+      "id": "IF"
+    },
+    {
+      "parameters": {
+        "fromEmail": "",
+        "toEmail": "dorak@kio.tech",
+        "ccEmail": "={{$json[\"EditorEmail\"]}}",
+        "subject": "Challenge: Actualización crítica en Google Sheets",
+        "text": "ID del ticket: {{$json[\"ID\"]}}\nEl sheets ha sido actualizado"
+      },
+      "name": "Enviar Correo",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [840, 360],
+      "id": "Email"
+    }
+  ],
+  "connections": {
+    "Google Sheets Trigger": {
+      "main": [
+        [
+          {
+            "node": "Verificar Prioridad y Estado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificar Prioridad y Estado": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Enviar Correo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "id": "1"
+}
